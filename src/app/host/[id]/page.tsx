@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState, use, useSyncExternalStore } from "react";
 import QRCode from "qrcode";
 import Link from "next/link";
 import { useGameState } from "@/lib/useGameState";
+import { useCountdown } from "@/lib/countdown";
 import type { Answer, Game, GameQuestion, Player, Prize } from "@/lib/types";
 
 function subscribeToStorage(callback: () => void) {
@@ -208,27 +209,6 @@ function Lobby({
   );
 }
 
-/**
- * Countdown that respects pause + extra seconds. `game` is the realtime game
- * row, so any pause / +30s / etc made by the host immediately propagates.
- */
-function useCountdown(game: Game) {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const t = setInterval(() => setNow(Date.now()), 250);
-    return () => clearInterval(t);
-  }, []);
-  if (!game.question_started_at) return game.question_duration_s;
-  const startMs = new Date(game.question_started_at).getTime();
-  // If paused, freeze "now" at the pause moment.
-  const effectiveNow = game.paused_started_at
-    ? new Date(game.paused_started_at).getTime()
-    : now;
-  const elapsedMs = effectiveNow - startMs - (game.paused_ms_total ?? 0);
-  const total = game.question_duration_s + (game.question_extra_s ?? 0);
-  return Math.max(0, total - Math.floor(elapsedMs / 1000));
-}
-
 function PlayingView({
   gameId,
   hostToken,
@@ -244,8 +224,7 @@ function PlayingView({
   players: Player[];
   answers: Answer[];
 }) {
-  const remaining = useCountdown(game);
-  const paused = !!game.paused_started_at;
+  const { remaining, paused } = useCountdown(game);
 
   const submittedByPlayer = useMemo(() => {
     if (!question) return new Map<string, number>();
@@ -776,6 +755,20 @@ function FinishedView({
           prizes={prizes}
         />
       )}
+      <div className="flex flex-col sm:flex-row gap-2 justify-center pt-4">
+        <Link
+          href="/"
+          className="px-6 py-3 rounded-2xl bg-white/10 hover:bg-white/20 border border-white/15 transition text-center font-medium"
+        >
+          ← Volver al inicio
+        </Link>
+        <Link
+          href="/host"
+          className="px-6 py-3 rounded-2xl bg-fuchsia-500 hover:bg-fuchsia-400 transition text-center font-semibold"
+        >
+          Crear nueva partida
+        </Link>
+      </div>
     </div>
   );
 }

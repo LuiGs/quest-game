@@ -7,8 +7,11 @@ import {
   use,
   useSyncExternalStore,
 } from "react";
+import Link from "next/link";
 import { useGameState } from "@/lib/useGameState";
-import type { Answer, GameQuestion, Player, Prize } from "@/lib/types";
+import { useCountdown } from "@/lib/countdown";
+import { PageHeader } from "@/components/PageHeader";
+import type { Answer, Game, GameQuestion, Player, Prize } from "@/lib/types";
 import { createBrowserClient } from "@/lib/supabase";
 
 type Session = { gameId: string; playerId: string; playerToken: string };
@@ -121,10 +124,7 @@ function ConnectedGame({
           me={me}
           players={players}
           question={questions.find((q) => q.idx === game.question_index)}
-          questionIndex={game.question_index}
-          totalQuestions={game.total_questions}
-          questionStartedAt={game.question_started_at}
-          duration={game.question_duration_s}
+          game={game}
           answers={answers}
         />
       )}
@@ -184,7 +184,11 @@ function JoinForm({
   }
 
   return (
-    <main className="min-h-screen flex flex-col items-center justify-center p-8 bg-linear-to-br from-indigo-950 via-purple-950 to-fuchsia-900 text-white">
+    <main className="min-h-screen p-6 sm:p-8 bg-linear-to-br from-indigo-950 via-purple-950 to-fuchsia-900 text-white">
+      <div className="max-w-md mx-auto">
+        <PageHeader backHref="/play" backLabel="Otro código" />
+      </div>
+      <div className="flex flex-col items-center justify-center pt-4">
       <div className="w-full max-w-md bg-white/5 backdrop-blur border border-white/10 rounded-3xl p-8 space-y-6">
         <div>
           <p className="text-sm text-purple-200/70">Partida</p>
@@ -221,6 +225,7 @@ function JoinForm({
           </>
         )}
       </div>
+      </div>
     </main>
   );
 }
@@ -248,27 +253,13 @@ function PlayerLobby({ players, me }: { players: Player[]; me: Player }) {
   );
 }
 
-function useCountdown(startedAt: string | null, durationSeconds: number) {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const t = setInterval(() => setNow(Date.now()), 250);
-    return () => clearInterval(t);
-  }, []);
-  if (!startedAt) return durationSeconds;
-  const elapsed = now - new Date(startedAt).getTime();
-  return Math.max(0, durationSeconds - Math.floor(elapsed / 1000));
-}
-
 function PlayerPlaying({
   gameId,
   session,
   me,
   players,
   question,
-  questionIndex,
-  totalQuestions,
-  questionStartedAt,
-  duration,
+  game,
   answers,
 }: {
   gameId: string;
@@ -276,13 +267,12 @@ function PlayerPlaying({
   me: Player;
   players: Player[];
   question: GameQuestion | undefined;
-  questionIndex: number;
-  totalQuestions: number;
-  questionStartedAt: string | null;
-  duration: number;
+  game: Game;
   answers: Answer[];
 }) {
-  const remaining = useCountdown(questionStartedAt, duration);
+  const { remaining, paused } = useCountdown(game);
+  const questionIndex = game.question_index;
+  const totalQuestions = game.total_questions;
 
   if (!question) {
     return (
@@ -303,6 +293,7 @@ function PlayerPlaying({
       questionIndex={questionIndex}
       totalQuestions={totalQuestions}
       remaining={remaining}
+      paused={paused}
       answers={answers}
     />
   );
@@ -317,6 +308,7 @@ function QuestionForm({
   questionIndex,
   totalQuestions,
   remaining,
+  paused,
   answers,
 }: {
   gameId: string;
@@ -327,6 +319,7 @@ function QuestionForm({
   questionIndex: number;
   totalQuestions: number;
   remaining: number;
+  paused: boolean;
   answers: Answer[];
 }) {
   const initialDrafts = useMemo(() => {
@@ -392,12 +385,14 @@ function QuestionForm({
         </span>
         <span
           className={
-            remaining <= 5
+            paused
+              ? "text-amber-200 text-lg font-bold"
+              : remaining <= 5
               ? "text-red-300 text-lg font-bold"
               : "text-lg font-bold"
           }
         >
-          {remaining}s
+          {paused ? "⏸ pausa" : `${remaining}s`}
         </span>
       </div>
 
@@ -731,6 +726,20 @@ function PlayerFinished({
       </p>
       <Standings players={players} me={me} />
       {prizes.length > 0 && <PrizeFeed prizes={prizes} players={players} />}
+      <div className="flex flex-col sm:flex-row gap-2 justify-center pt-2">
+        <Link
+          href="/"
+          className="px-6 py-3 rounded-2xl bg-white/10 hover:bg-white/20 border border-white/15 transition text-center font-medium"
+        >
+          ← Volver al inicio
+        </Link>
+        <Link
+          href="/play"
+          className="px-6 py-3 rounded-2xl bg-fuchsia-500 hover:bg-fuchsia-400 transition text-center font-semibold"
+        >
+          Unirme a otra partida
+        </Link>
+      </div>
     </div>
   );
 }
