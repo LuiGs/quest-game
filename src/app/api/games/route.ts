@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { nanoid } from "nanoid";
 import { createServiceClient } from "@/lib/supabase";
 import { generateGameCode } from "@/lib/codes";
-import { pickQuestions } from "@/lib/questions";
+import { pickQuestionsFromBank } from "@/lib/pickQuestions";
 
 const DEFAULT_TOTAL_QUESTIONS = 10;
 const DEFAULT_DURATION_S = 60;
@@ -54,8 +54,15 @@ export async function POST(request: Request) {
     );
   }
 
-  // Pre-pick the question list for this game.
-  const questions = pickQuestions(total).map((q, idx) => ({
+  // Pre-pick the question list for this game from the global bank.
+  const picked = await pickQuestionsFromBank(supabase, total);
+  if (picked.length === 0) {
+    return NextResponse.json(
+      { error: "El banco de preguntas está vacío" },
+      { status: 500 }
+    );
+  }
+  const questions = picked.map((q, idx) => ({
     game_id: game!.id,
     idx,
     prompt: q.prompt,

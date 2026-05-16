@@ -35,3 +35,15 @@ export async function requirePlayer(
   if (data.player_token !== playerToken) return null;
   return data;
 }
+
+/**
+ * Check whether an admin token matches the server-side `ADMIN_TOKEN` env var.
+ * Used to gate question-bank mutations. Returns false if the env var is unset
+ * (i.e. admin features are effectively disabled).
+ */
+export function isAdmin(token: string | null | undefined): boolean {
+  const expected = process.env.ADMIN_TOKEN;
+  if (!expected) return false;
+  if (!token) return false;
+  return token === expected;
+}

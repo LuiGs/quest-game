@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { requireHost } from "@/lib/auth";
-import { judgeQuestion } from "@/lib/judge";
+import { suggestVerdicts } from "@/lib/judge";
 
 export async function POST(
   request: NextRequest,
@@ -36,11 +36,15 @@ export async function POST(
     );
   }
 
-  const stats = await judgeQuestion(supabase, id, question.id);
+  const stats = await suggestVerdicts(supabase, id, question.id);
 
+  // Clear pause/extension state when leaving playing phase.
   const { error } = await supabase
     .from("games")
-    .update({ status: "reveal" })
+    .update({
+      status: "reveal",
+      paused_started_at: null,
+    })
     .eq("id", id);
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 });

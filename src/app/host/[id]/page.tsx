@@ -2,8 +2,9 @@
 
 import { useEffect, useMemo, useState, use, useSyncExternalStore } from "react";
 import QRCode from "qrcode";
+import Link from "next/link";
 import { useGameState } from "@/lib/useGameState";
-import type { Answer, GameQuestion, Player } from "@/lib/types";
+import type { Answer, Game, GameQuestion, Player, Prize } from "@/lib/types";
 
 function subscribeToStorage(callback: () => void) {
   if (typeof window === "undefined") return () => {};
@@ -26,7 +27,8 @@ export default function HostGamePage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = use(params);
-  const { game, players, questions, answers, loading } = useGameState(id);
+  const { game, players, questions, answers, prizes, loading } =
+    useGameState(id);
   const hostToken = useHostToken(id);
 
   if (loading || !game) {
@@ -51,11 +53,8 @@ export default function HostGamePage({
         <PlayingView
           gameId={id}
           hostToken={hostToken}
-          questionStartedAt={game.question_started_at}
-          duration={game.question_duration_s}
+          game={game}
           question={questions.find((q) => q.idx === game.question_index)}
-          questionIndex={game.question_index}
-          totalQuestions={game.total_questions}
           players={players}
           answers={answers}
         />
@@ -69,10 +68,16 @@ export default function HostGamePage({
           totalQuestions={game.total_questions}
           players={players}
           answers={answers}
+          prizes={prizes}
         />
       )}
       {game.status === "finished" && (
-        <FinishedView players={players} />
+        <FinishedView
+          gameId={id}
+          hostToken={hostToken}
+          players={players}
+          prizes={prizes}
+        />
       )}
     </main>
   );
@@ -173,17 +178,25 @@ function Lobby({
             {error && (
               <p className="text-sm text-red-300 mb-3">{error}</p>
             )}
-            <button
-              onClick={start}
-              disabled={starting || players.length < 2}
-              className="mt-auto px-6 py-4 rounded-2xl bg-fuchsia-500 hover:bg-fuchsia-400 disabled:opacity-40 transition font-semibold text-lg"
-            >
-              {starting
-                ? "Empezando…"
-                : players.length < 2
-                ? "Necesitás al menos 2 jugadores"
-                : "Empezar partida"}
-            </button>
+            <div className="mt-auto space-y-2">
+              <button
+                onClick={start}
+                disabled={starting || players.length < 2}
+                className="w-full px-6 py-4 rounded-2xl bg-fuchsia-500 hover:bg-fuchsia-400 disabled:opacity-40 transition font-semibold text-lg"
+              >
+                {starting
+                  ? "Empezando…"
+                  : players.length < 2
+                  ? "Necesitás al menos 2 jugadores"
+                  : "Empezar partida"}
+              </button>
+              <Link
+                href="/host/bank"
+                className="block text-center w-full px-4 py-2.5 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-sm transition"
+              >
+                Gestionar banco de preguntas
+              </Link>
+            </div>
           </>
         ) : (
           <p className="mt-auto text-purple-200/60 text-sm">
@@ -195,40 +208,45 @@ function Lobby({
   );
 }
 
-function useCountdown(startedAt: string | null, durationSeconds: number) {
+/**
+ * Countdown that respects pause + extra seconds. `game` is the realtime game
+ * row, so any pause / +30s / etc made by the host immediately propagates.
+ */
+function useCountdown(game: Game) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 250);
     return () => clearInterval(t);
   }, []);
-  if (!startedAt) return durationSeconds;
-  const elapsedMs = now - new Date(startedAt).getTime();
-  const remaining = Math.max(0, durationSeconds - Math.floor(elapsedMs / 1000));
-  return remaining;
+  if (!game.question_started_at) return game.question_duration_s;
+  const startMs = new Date(game.question_started_at).getTime();
+  // If paused, freeze "now" at the pause moment.
+  const effectiveNow = game.paused_started_at
+    ? new Date(game.paused_started_at).getTime()
+    : now;
+  const elapsedMs = effectiveNow - startMs - (game.paused_ms_total ?? 0);
+  const total = game.question_duration_s + (game.question_extra_s ?? 0);
+  return Math.max(0, total - Math.floor(elapsedMs / 1000));
 }
 
 function PlayingView({
   gameId,
   hostToken,
-  questionStartedAt,
-  duration,
+  game,
   question,
-  questionIndex,
-  totalQuestions,
   players,
   answers,
 }: {
   gameId: string;
   hostToken: string | null;
-  questionStartedAt: string | null;
-  duration: number;
+  game: Game;
   question: GameQuestion | undefined;
-  questionIndex: number;
-  totalQuestions: number;
   players: Player[];
   answers: Answer[];
 }) {
-  const remaining = useCountdown(questionStartedAt, duration);
+  const remaining = useCountdown(game);
+  const paused = !!game.paused_started_at;
+
   const submittedByPlayer = useMemo(() => {
     if (!question) return new Map<string, number>();
     const m = new Map<string, number>();
@@ -239,40 +257,42 @@ function PlayingView({
     return m;
   }, [answers, question]);
 
-  // Each player owes: 1 self answer + (players.length - 1) guesses = players.length
   const owedPerPlayer = players.length;
 
-  async function endNow() {
+  async function hostAction(action: string, extra?: Record<string, unknown>) {
     if (!hostToken) return;
-    await fetch(`/api/games/${gameId}/end-question`, {
+    await fetch(`/api/games/${gameId}/${action}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ hostToken }),
+      body: JSON.stringify({ hostToken, ...extra }),
     });
   }
 
-  // Auto-end when timer hits 0 (host device only).
+  // Auto-end when timer hits 0 — only on host device, only when not paused.
   useEffect(() => {
     if (!hostToken) return;
+    if (paused) return;
     if (remaining > 0) return;
-    endNow();
+    hostAction("end-question");
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [remaining, hostToken]);
+  }, [remaining, hostToken, paused]);
 
   return (
     <div className="max-w-5xl mx-auto space-y-8">
       <div className="flex justify-between items-center text-purple-100/70 text-sm uppercase tracking-widest">
         <span>
-          Pregunta {questionIndex + 1} / {totalQuestions}
+          Pregunta {game.question_index + 1} / {game.total_questions}
         </span>
         <span
           className={
-            remaining <= 5
+            paused
+              ? "text-amber-200 text-2xl font-bold"
+              : remaining <= 5
               ? "text-red-300 text-2xl font-bold"
               : "text-2xl font-bold"
           }
         >
-          {remaining}s
+          {paused ? "⏸ pausa" : `${remaining}s`}
         </span>
       </div>
 
@@ -305,10 +325,28 @@ function PlayingView({
       </div>
 
       {hostToken && (
-        <div className="text-center">
+        <div className="flex flex-wrap gap-2 justify-center">
           <button
-            onClick={endNow}
-            className="px-6 py-3 rounded-2xl bg-white/10 hover:bg-white/20 border border-white/20 transition"
+            onClick={() => hostAction(paused ? "resume" : "pause")}
+            className="px-5 py-2.5 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 border border-amber-400/40 text-amber-100 font-medium transition"
+          >
+            {paused ? "▶ Reanudar" : "⏸ Pausar"}
+          </button>
+          <button
+            onClick={() => hostAction("add-time", { seconds: 30 })}
+            className="px-5 py-2.5 rounded-xl bg-white/5 hover:bg-white/15 border border-white/10 transition"
+          >
+            +30s
+          </button>
+          <button
+            onClick={() => hostAction("skip")}
+            className="px-5 py-2.5 rounded-xl bg-white/5 hover:bg-white/15 border border-white/10 transition"
+          >
+            Saltar pregunta
+          </button>
+          <button
+            onClick={() => hostAction("end-question")}
+            className="px-5 py-2.5 rounded-xl bg-fuchsia-500 hover:bg-fuchsia-400 font-semibold transition"
           >
             Cerrar pregunta ahora
           </button>
@@ -326,6 +364,7 @@ function RevealView({
   totalQuestions,
   players,
   answers,
+  prizes,
 }: {
   gameId: string;
   hostToken: string | null;
@@ -334,6 +373,7 @@ function RevealView({
   totalQuestions: number;
   players: Player[];
   answers: Answer[];
+  prizes: Prize[];
 }) {
   const [advancing, setAdvancing] = useState(false);
   const playerById = useMemo(() => {
@@ -359,12 +399,14 @@ function RevealView({
     () => questionAnswers.filter((a) => !a.is_self),
     [questionAnswers]
   );
-  const pending = useMemo(
-    () => guesses.filter((a) => a.verdict === "pending"),
-    [guesses]
-  );
+  const pendingCount = guesses.filter(
+    (g) => g.peer_vote == null && g.verdict !== "correct" && g.verdict !== "wrong"
+  ).length;
 
-  async function setVerdict(answerId: string, verdict: "correct" | "wrong") {
+  async function overrideVerdict(
+    answerId: string,
+    verdict: "correct" | "partial" | "wrong"
+  ) {
     if (!hostToken) return;
     await fetch(`/api/games/${gameId}/verdict`, {
       method: "POST",
@@ -384,8 +426,6 @@ function RevealView({
     setAdvancing(false);
   }
 
-  // Group guesses by target to show "what each player really said vs what
-  // others guessed about them".
   const byTarget = useMemo(() => {
     const m = new Map<string, Answer[]>();
     for (const g of guesses) {
@@ -402,57 +442,16 @@ function RevealView({
         <span>
           Pregunta {questionIndex + 1} / {totalQuestions} — Resultados
         </span>
+        {pendingCount > 0 && (
+          <span className="text-amber-200 normal-case tracking-normal">
+            Esperando {pendingCount} voto{pendingCount === 1 ? "" : "s"}…
+          </span>
+        )}
       </div>
 
       <div className="bg-white/5 border border-white/10 rounded-3xl p-8 text-center">
-        <h2 className="text-3xl sm:text-5xl font-black">
-          {question?.prompt}
-        </h2>
+        <h2 className="text-3xl sm:text-5xl font-black">{question?.prompt}</h2>
       </div>
-
-      {pending.length > 0 && hostToken && (
-        <div className="bg-amber-500/10 border border-amber-400/40 rounded-3xl p-6 space-y-3">
-          <h3 className="font-bold text-amber-200">
-            Revisar manualmente ({pending.length})
-          </h3>
-          {pending.map((g) => {
-            const author = playerById.get(g.author_id);
-            const target = playerById.get(g.target_id);
-            const truth = selfByTarget.get(g.target_id);
-            return (
-              <div
-                key={g.id}
-                className="flex flex-col sm:flex-row sm:items-center gap-3 bg-black/30 rounded-xl p-3"
-              >
-                <div className="flex-1 text-sm">
-                  <span className="font-semibold">{author?.name}</span>
-                  <span className="text-purple-100/60"> dijo sobre </span>
-                  <span className="font-semibold">{target?.name}</span>
-                  : <span className="font-bold text-fuchsia-200">{g.text}</span>
-                  <span className="text-purple-100/60">
-                    {" "}
-                    (real: {truth?.text ?? "—"})
-                  </span>
-                </div>
-                <div className="flex gap-2">
-                  <button
-                    onClick={() => setVerdict(g.id, "correct")}
-                    className="px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-sm font-semibold"
-                  >
-                    ✓ Acierta
-                  </button>
-                  <button
-                    onClick={() => setVerdict(g.id, "wrong")}
-                    className="px-3 py-1.5 rounded-lg bg-red-500 hover:bg-red-400 text-sm font-semibold"
-                  >
-                    ✗ Falla
-                  </button>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      )}
 
       <div className="grid md:grid-cols-2 gap-4">
         {players.map((target) => {
@@ -463,15 +462,16 @@ function RevealView({
               key={target.id}
               className="bg-white/5 border border-white/10 rounded-2xl p-5"
             >
-              <div className="flex items-baseline justify-between mb-2">
+              <div className="flex items-baseline justify-between mb-3 gap-2">
                 <h3 className="font-bold text-lg">{target.name}</h3>
-                <span className="text-xs text-purple-100/60">
-                  Real: <span className="text-fuchsia-200 font-semibold">
+                <span className="text-xs text-purple-100/60 text-right">
+                  Real:{" "}
+                  <span className="text-fuchsia-200 font-semibold">
                     {truth?.text ?? "—"}
                   </span>
                 </span>
               </div>
-              <ul className="space-y-1.5">
+              <ul className="space-y-2">
                 {targetGuesses.length === 0 && (
                   <li className="text-sm text-purple-100/50">
                     Nadie respondió sobre {target.name}.
@@ -479,30 +479,45 @@ function RevealView({
                 )}
                 {targetGuesses.map((g) => {
                   const author = playerById.get(g.author_id);
-                  const color =
-                    g.verdict === "correct"
-                      ? "text-emerald-300"
-                      : g.verdict === "wrong"
-                      ? "text-red-300/80"
-                      : "text-amber-200";
-                  const symbol =
-                    g.verdict === "correct"
-                      ? "✓"
-                      : g.verdict === "wrong"
-                      ? "✗"
-                      : "?";
                   return (
                     <li
                       key={g.id}
-                      className="flex justify-between items-center text-sm"
+                      className="bg-black/20 rounded-lg p-2.5 space-y-1.5"
                     >
-                      <span>
-                        <span className="text-purple-100/70">
-                          {author?.name}:
-                        </span>{" "}
-                        {g.text}
-                      </span>
-                      <span className={`font-bold ${color}`}>{symbol}</span>
+                      <div className="flex justify-between gap-2 text-sm">
+                        <span>
+                          <span className="text-purple-100/70">
+                            {author?.name}:
+                          </span>{" "}
+                          <span className="font-medium">{g.text}</span>
+                        </span>
+                        <VerdictBadge verdict={g.verdict} peer={g.peer_vote} />
+                      </div>
+                      {hostToken && (
+                        <div className="flex gap-1.5 text-xs">
+                          <button
+                            onClick={() => overrideVerdict(g.id, "correct")}
+                            className="px-2 py-1 rounded bg-emerald-500/15 hover:bg-emerald-500/30 text-emerald-200 transition"
+                          >
+                            ✓
+                          </button>
+                          <button
+                            onClick={() => overrideVerdict(g.id, "partial")}
+                            className="px-2 py-1 rounded bg-amber-500/15 hover:bg-amber-500/30 text-amber-200 transition"
+                          >
+                            ~
+                          </button>
+                          <button
+                            onClick={() => overrideVerdict(g.id, "wrong")}
+                            className="px-2 py-1 rounded bg-red-500/15 hover:bg-red-500/30 text-red-200 transition"
+                          >
+                            ✗
+                          </button>
+                          <span className="text-purple-100/40 ml-auto">
+                            override
+                          </span>
+                        </div>
+                      )}
                     </li>
                   );
                 })}
@@ -512,7 +527,20 @@ function RevealView({
         })}
       </div>
 
-      <Ranking players={players} />
+      <Ranking
+        players={players}
+        gameId={gameId}
+        hostToken={hostToken}
+      />
+
+      {hostToken && (
+        <PrizePanel
+          gameId={gameId}
+          hostToken={hostToken}
+          players={players}
+          prizes={prizes}
+        />
+      )}
 
       {hostToken && (
         <div className="text-center">
@@ -531,8 +559,52 @@ function RevealView({
   );
 }
 
-function Ranking({ players }: { players: Player[] }) {
+function VerdictBadge({
+  verdict,
+  peer,
+}: {
+  verdict: string | null;
+  peer: string | null;
+}) {
+  if (verdict === "correct")
+    return (
+      <span className="text-emerald-300 font-bold whitespace-nowrap">
+        ✓ 2pt
+      </span>
+    );
+  if (verdict === "partial")
+    return (
+      <span className="text-amber-200 font-bold whitespace-nowrap">
+        ~ 1pt
+      </span>
+    );
+  if (verdict === "wrong")
+    return <span className="text-red-300/80 font-bold">✗</span>;
+  if (peer == null)
+    return (
+      <span className="text-purple-100/50 italic text-xs">esperando…</span>
+    );
+  return <span className="text-purple-100/50">?</span>;
+}
+
+function Ranking({
+  players,
+  gameId,
+  hostToken,
+}: {
+  players: Player[];
+  gameId?: string;
+  hostToken?: string | null;
+}) {
   const sorted = [...players].sort((a, b) => b.score - a.score);
+  async function adjust(playerId: string, delta: number) {
+    if (!hostToken || !gameId) return;
+    await fetch(`/api/games/${gameId}/score-adjust`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ hostToken, playerId, delta }),
+    });
+  }
   return (
     <div className="bg-white/5 border border-white/10 rounded-2xl p-5">
       <h3 className="font-bold mb-3">Ranking</h3>
@@ -540,13 +612,39 @@ function Ranking({ players }: { players: Player[] }) {
         {sorted.map((p, i) => (
           <li
             key={p.id}
-            className="flex justify-between items-center px-3 py-2 rounded-lg bg-black/20"
+            className="flex justify-between items-center px-3 py-2 rounded-lg bg-black/20 gap-2"
           >
-            <span>
+            <span className="flex-1 min-w-0">
               <span className="text-purple-100/60 mr-2">#{i + 1}</span>
               <span className="font-medium">{p.name}</span>
+              {p.score_bonus !== 0 && (
+                <span className="ml-2 text-xs text-amber-200">
+                  ({p.score_bonus > 0 ? "+" : ""}
+                  {p.score_bonus} manual)
+                </span>
+              )}
             </span>
-            <span className="font-bold text-fuchsia-200">{p.score} pts</span>
+            <span className="font-bold text-fuchsia-200 whitespace-nowrap">
+              {p.score} pts
+            </span>
+            {hostToken && gameId && (
+              <span className="flex gap-1">
+                <button
+                  onClick={() => adjust(p.id, -1)}
+                  className="w-7 h-7 rounded bg-white/5 hover:bg-white/15 text-xs"
+                  title="-1 punto manual"
+                >
+                  −
+                </button>
+                <button
+                  onClick={() => adjust(p.id, 1)}
+                  className="w-7 h-7 rounded bg-white/5 hover:bg-white/15 text-xs"
+                  title="+1 punto manual"
+                >
+                  +
+                </button>
+              </span>
+            )}
           </li>
         ))}
       </ol>
@@ -554,7 +652,107 @@ function Ranking({ players }: { players: Player[] }) {
   );
 }
 
-function FinishedView({ players }: { players: Player[] }) {
+function PrizePanel({
+  gameId,
+  hostToken,
+  players,
+  prizes,
+}: {
+  gameId: string;
+  hostToken: string;
+  players: Player[];
+  prizes: Prize[];
+}) {
+  const [recipient, setRecipient] = useState<string>(players[0]?.id ?? "");
+  const [label, setLabel] = useState("");
+  const playerById = useMemo(
+    () => new Map(players.map((p) => [p.id, p.name])),
+    [players]
+  );
+  async function give() {
+    if (!recipient || !label.trim()) return;
+    await fetch(`/api/games/${gameId}/prizes`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ hostToken, recipientId: recipient, label }),
+    });
+    setLabel("");
+  }
+  async function remove(prizeId: string) {
+    await fetch(`/api/games/${gameId}/prizes`, {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ hostToken, prizeId }),
+    });
+  }
+  return (
+    <div className="bg-amber-500/10 border border-amber-400/30 rounded-2xl p-5 space-y-3">
+      <h3 className="font-bold">🏆 Entregar premio</h3>
+      <div className="flex flex-col sm:flex-row gap-2">
+        <select
+          value={recipient}
+          onChange={(e) => setRecipient(e.target.value)}
+          className="flex-1 bg-black/40 border border-white/10 rounded-xl px-3 py-2 outline-none"
+        >
+          {players.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.name}
+            </option>
+          ))}
+        </select>
+        <input
+          value={label}
+          onChange={(e) => setLabel(e.target.value)}
+          placeholder="ej: alfajor, comodín, beso de mamá"
+          className="flex-1 bg-black/40 border border-white/10 rounded-xl px-3 py-2 outline-none"
+        />
+        <button
+          onClick={give}
+          disabled={!label.trim()}
+          className="px-5 py-2 rounded-xl bg-amber-400 hover:bg-amber-300 text-black font-semibold disabled:opacity-50 transition"
+        >
+          Entregar
+        </button>
+      </div>
+      {prizes.length > 0 && (
+        <ul className="space-y-1 text-sm">
+          {prizes.map((pr) => (
+            <li
+              key={pr.id}
+              className="flex justify-between items-center bg-black/20 rounded-lg px-3 py-1.5"
+            >
+              <span>
+                <span className="font-semibold text-amber-200">
+                  {playerById.get(pr.recipient_id) ?? "—"}
+                </span>
+                : {pr.label}
+              </span>
+              <button
+                onClick={() => remove(pr.id)}
+                className="text-purple-100/40 hover:text-red-300 text-xs"
+                title="Quitar"
+              >
+                ✕
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function FinishedView({
+  gameId,
+  hostToken,
+  players,
+  prizes,
+}: {
+  gameId: string;
+  hostToken: string | null;
+  players: Player[];
+  prizes: Prize[];
+}) {
   const sorted = [...players].sort((a, b) => b.score - a.score);
   const winner = sorted[0];
   return (
@@ -569,7 +767,15 @@ function FinishedView({ players }: { players: Player[] }) {
           con <span className="font-bold">{winner.score} pts</span>
         </p>
       )}
-      <Ranking players={players} />
+      <Ranking players={players} gameId={gameId} hostToken={hostToken} />
+      {hostToken && (
+        <PrizePanel
+          gameId={gameId}
+          hostToken={hostToken}
+          players={players}
+          prizes={prizes}
+        />
+      )}
     </div>
   );
 }

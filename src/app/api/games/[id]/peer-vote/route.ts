@@ -1,11 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
-import { requireHost } from "@/lib/auth";
+import { requirePlayer } from "@/lib/auth";
 import { recomputeScores } from "@/lib/judge";
 
 /**
- * Host overrides the verdict for one answer. Body:
- *   { hostToken, answerId, verdict: 'correct' | 'wrong' }
+ * Body: { playerId, playerToken, answerId, vote: 'correct'|'partial'|'wrong' }
+ * The voter MUST be the `target_id` of the answer (you can only judge what
+ * others said about you).
  */
 export async function POST(
   request: NextRequest,
@@ -13,27 +14,33 @@ export async function POST(
 ) {
   const { id } = await ctx.params;
   const body = (await request.json().catch(() => ({}))) as {
-    hostToken?: string;
+    playerId?: string;
+    playerToken?: string;
     answerId?: string;
-    verdict?: "correct" | "partial" | "wrong";
+    vote?: "correct" | "partial" | "wrong";
   };
   const supabase = createServiceClient();
-  const game = await requireHost(supabase, id, body.hostToken);
-  if (!game) {
+  const player = await requirePlayer(
+    supabase,
+    id,
+    body.playerId,
+    body.playerToken
+  );
+  if (!player) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
   if (
     !body.answerId ||
-    (body.verdict !== "correct" &&
-      body.verdict !== "partial" &&
-      body.verdict !== "wrong")
+    (body.vote !== "correct" &&
+      body.vote !== "partial" &&
+      body.vote !== "wrong")
   ) {
     return NextResponse.json({ error: "Bad input" }, { status: 400 });
   }
 
   const { data: answer, error: aErr } = await supabase
     .from("answers")
-    .select("id, game_id, is_self")
+    .select("id, game_id, target_id, is_self")
     .eq("id", body.answerId)
     .maybeSingle();
   if (aErr || !answer) {
@@ -47,14 +54,21 @@ export async function POST(
   }
   if (answer.is_self) {
     return NextResponse.json(
-      { error: "Self answers no se juzgan" },
+      { error: "No se juzgan las auto-respuestas" },
       { status: 400 }
     );
   }
+  if (answer.target_id !== player.id) {
+    return NextResponse.json(
+      { error: "Solo el sujeto de la pregunta puede votar" },
+      { status: 403 }
+    );
+  }
 
+  // peer_vote and verdict move together unless host has overridden later.
   const { error } = await supabase
     .from("answers")
-    .update({ verdict: body.verdict, auto_match: false })
+    .update({ peer_vote: body.vote, verdict: body.vote })
     .eq("id", body.answerId);
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 });

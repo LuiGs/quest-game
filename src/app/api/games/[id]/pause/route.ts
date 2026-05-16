@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { requireHost } from "@/lib/auth";
 
+/** Pause the current question timer. */
 export async function POST(
   request: NextRequest,
   ctx: { params: Promise<{ id: string }> }
@@ -15,32 +16,18 @@ export async function POST(
   if (!game) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
-  if (game.status !== "lobby") {
+  if (game.status !== "playing") {
     return NextResponse.json(
-      { error: "La partida ya empezó" },
+      { error: "No hay pregunta activa" },
       { status: 409 }
     );
   }
-  const { count } = await supabase
-    .from("players")
-    .select("*", { count: "exact", head: true })
-    .eq("game_id", id);
-  if ((count ?? 0) < 2) {
-    return NextResponse.json(
-      { error: "Se necesitan al menos 2 jugadores" },
-      { status: 400 }
-    );
+  if (game.paused_started_at) {
+    return NextResponse.json({ ok: true, alreadyPaused: true });
   }
   const { error } = await supabase
     .from("games")
-    .update({
-      status: "playing",
-      question_index: 0,
-      question_started_at: new Date().toISOString(),
-      question_extra_s: 0,
-      paused_started_at: null,
-      paused_ms_total: 0,
-    })
+    .update({ paused_started_at: new Date().toISOString() })
     .eq("id", id);
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 });

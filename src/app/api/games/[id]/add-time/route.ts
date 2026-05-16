@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { requireHost } from "@/lib/auth";
 
+/** Add seconds to the current question's timer. Body: { hostToken, seconds }. */
 export async function POST(
   request: NextRequest,
   ctx: { params: Promise<{ id: string }> }
@@ -9,38 +10,23 @@ export async function POST(
   const { id } = await ctx.params;
   const body = (await request.json().catch(() => ({}))) as {
     hostToken?: string;
+    seconds?: number;
   };
+  const seconds = Math.max(1, Math.min(300, Math.round(body.seconds ?? 30)));
   const supabase = createServiceClient();
   const game = await requireHost(supabase, id, body.hostToken);
   if (!game) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
-  if (game.status !== "lobby") {
+  if (game.status !== "playing") {
     return NextResponse.json(
-      { error: "La partida ya empezó" },
+      { error: "No hay pregunta activa" },
       { status: 409 }
-    );
-  }
-  const { count } = await supabase
-    .from("players")
-    .select("*", { count: "exact", head: true })
-    .eq("game_id", id);
-  if ((count ?? 0) < 2) {
-    return NextResponse.json(
-      { error: "Se necesitan al menos 2 jugadores" },
-      { status: 400 }
     );
   }
   const { error } = await supabase
     .from("games")
-    .update({
-      status: "playing",
-      question_index: 0,
-      question_started_at: new Date().toISOString(),
-      question_extra_s: 0,
-      paused_started_at: null,
-      paused_ms_total: 0,
-    })
+    .update({ question_extra_s: (game.question_extra_s ?? 0) + seconds })
     .eq("id", id);
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 });

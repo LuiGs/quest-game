@@ -2,13 +2,14 @@
 
 import { useEffect, useRef, useState } from "react";
 import { createBrowserClient } from "./supabase";
-import type { Answer, Game, GameQuestion, Player } from "./types";
+import type { Answer, Game, GameQuestion, Player, Prize } from "./types";
 
 export type GameState = {
   game: Game | null;
   players: Player[];
   questions: GameQuestion[];
   answers: Answer[];
+  prizes: Prize[];
   loading: boolean;
 };
 
@@ -22,6 +23,7 @@ export function useGameState(gameId: string | null): GameState {
   const [players, setPlayers] = useState<Player[]>([]);
   const [questions, setQuestions] = useState<GameQuestion[]>([]);
   const [answers, setAnswers] = useState<Answer[]>([]);
+  const [prizes, setPrizes] = useState<Prize[]>([]);
   const [loading, setLoading] = useState(true);
   const supabaseRef = useRef<ReturnType<typeof createBrowserClient> | null>(
     null
@@ -34,7 +36,7 @@ export function useGameState(gameId: string | null): GameState {
     let cancelled = false;
 
     async function snapshot() {
-      const [g, p, q, a] = await Promise.all([
+      const [g, p, q, a, pr] = await Promise.all([
         supabase.from("games").select("*").eq("id", gameId).maybeSingle(),
         supabase
           .from("players")
@@ -47,12 +49,18 @@ export function useGameState(gameId: string | null): GameState {
           .eq("game_id", gameId)
           .order("idx", { ascending: true }),
         supabase.from("answers").select("*").eq("game_id", gameId),
+        supabase
+          .from("prizes")
+          .select("*")
+          .eq("game_id", gameId)
+          .order("given_at", { ascending: true }),
       ]);
       if (cancelled) return;
       setGame((g.data as Game) ?? null);
       setPlayers((p.data as Player[]) ?? []);
       setQuestions((q.data as GameQuestion[]) ?? []);
       setAnswers((a.data as Answer[]) ?? []);
+      setPrizes((pr.data as Prize[]) ?? []);
       setLoading(false);
     }
     snapshot();
@@ -90,6 +98,13 @@ export function useGameState(gameId: string | null): GameState {
           setAnswers((prev) => applyChange(prev, payload));
         }
       )
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "prizes", filter: `game_id=eq.${gameId}` },
+        (payload) => {
+          setPrizes((prev) => applyChange(prev, payload));
+        }
+      )
       .subscribe();
 
     return () => {
@@ -98,7 +113,7 @@ export function useGameState(gameId: string | null): GameState {
     };
   }, [gameId]);
 
-  return { game, players, questions, answers, loading };
+  return { game, players, questions, answers, prizes, loading };
 }
 
 type Row = { id: string };

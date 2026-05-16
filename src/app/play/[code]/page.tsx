@@ -8,7 +8,7 @@ import {
   useSyncExternalStore,
 } from "react";
 import { useGameState } from "@/lib/useGameState";
-import type { Answer, GameQuestion, Player } from "@/lib/types";
+import type { Answer, GameQuestion, Player, Prize } from "@/lib/types";
 import { createBrowserClient } from "@/lib/supabase";
 
 type Session = { gameId: string; playerId: string; playerToken: string };
@@ -92,7 +92,8 @@ function ConnectedGame({
   code: string;
   session: Session | null;
 }) {
-  const { game, players, questions, answers, loading } = useGameState(gameId);
+  const { game, players, questions, answers, prizes, loading } =
+    useGameState(gameId);
   const me = session
     ? players.find((p) => p.id === session.playerId) ?? null
     : null;
@@ -129,14 +130,17 @@ function ConnectedGame({
       )}
       {game.status === "reveal" && (
         <PlayerReveal
+          gameId={gameId}
+          session={session}
           me={me}
           players={players}
           question={questions.find((q) => q.idx === game.question_index)}
           answers={answers}
+          prizes={prizes}
         />
       )}
       {game.status === "finished" && (
-        <PlayerFinished players={players} me={me} />
+        <PlayerFinished players={players} me={me} prizes={prizes} />
       )}
     </main>
   );
@@ -477,15 +481,21 @@ function Field({
 }
 
 function PlayerReveal({
+  gameId,
+  session,
   me,
   players,
   question,
   answers,
+  prizes,
 }: {
+  gameId: string;
+  session: Session;
   me: Player;
   players: Player[];
   question: GameQuestion | undefined;
   answers: Answer[];
+  prizes: Prize[];
 }) {
   const playerById = new Map(players.map((p) => [p.id, p]));
   const qa = answers.filter((a) => question && a.question_id === question.id);
@@ -494,6 +504,19 @@ function PlayerReveal({
 
   const myGuesses = qa.filter((a) => a.author_id === me.id && !a.is_self);
   const aboutMe = qa.filter((a) => a.target_id === me.id && !a.is_self);
+
+  async function vote(answerId: string, v: "correct" | "partial" | "wrong") {
+    await fetch(`/api/games/${gameId}/peer-vote`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        playerId: session.playerId,
+        playerToken: session.playerToken,
+        answerId,
+        vote: v,
+      }),
+    });
+  }
 
   return (
     <div className="max-w-2xl mx-auto space-y-6 pb-10">
@@ -504,8 +527,62 @@ function PlayerReveal({
         <h2 className="text-2xl sm:text-3xl font-black">{question?.prompt}</h2>
       </div>
 
+      <section className="bg-fuchsia-500/10 border border-fuchsia-400/40 rounded-2xl p-5 space-y-3">
+        <div>
+          <h3 className="font-bold">¿Quién te conoce? Votá las respuestas sobre vos</h3>
+          <p className="text-xs text-purple-100/70 mt-1">
+            ✓ Acertó = 2 pts &nbsp;·&nbsp; ~ Más o menos = 1 pt &nbsp;·&nbsp; ✗ No
+            = 0 pts
+          </p>
+        </div>
+        {aboutMe.length === 0 && (
+          <p className="text-purple-100/60 text-sm">
+            Nadie respondió sobre vos en esta pregunta.
+          </p>
+        )}
+        {aboutMe.map((g) => {
+          const author = playerById.get(g.author_id);
+          return (
+            <div
+              key={g.id}
+              className="flex flex-col gap-2 bg-black/30 rounded-xl p-3"
+            >
+              <div className="text-sm">
+                <span className="text-purple-100/70">{author?.name} dijo:</span>{" "}
+                <span className="font-semibold">{g.text}</span>
+                {g.peer_vote == null && g.auto_match && (
+                  <span className="ml-2 text-xs text-emerald-300/70">
+                    (auto-juez: ✓)
+                  </span>
+                )}
+              </div>
+              <div className="flex gap-2">
+                <VoteBtn
+                  current={g.peer_vote}
+                  value="correct"
+                  label="✓ Acertó"
+                  onClick={() => vote(g.id, "correct")}
+                />
+                <VoteBtn
+                  current={g.peer_vote}
+                  value="partial"
+                  label="~ Más o menos"
+                  onClick={() => vote(g.id, "partial")}
+                />
+                <VoteBtn
+                  current={g.peer_vote}
+                  value="wrong"
+                  label="✗ No"
+                  onClick={() => vote(g.id, "wrong")}
+                />
+              </div>
+            </div>
+          );
+        })}
+      </section>
+
       <section className="bg-white/5 border border-white/10 rounded-2xl p-5 space-y-2">
-        <h3 className="font-bold">Tus aciertos</h3>
+        <h3 className="font-bold">Tus respuestas sobre los demás</h3>
         {myGuesses.length === 0 && (
           <p className="text-purple-100/60 text-sm">No respondiste sobre nadie.</p>
         )}
@@ -530,39 +607,79 @@ function PlayerReveal({
         })}
       </section>
 
-      <section className="bg-white/5 border border-white/10 rounded-2xl p-5 space-y-2">
-        <h3 className="font-bold">Lo que dijeron sobre vos</h3>
-        {aboutMe.length === 0 && (
-          <p className="text-purple-100/60 text-sm">Nadie respondió sobre vos.</p>
-        )}
-        {aboutMe.map((g) => {
-          const author = playerById.get(g.author_id);
-          return (
-            <div
-              key={g.id}
-              className="flex justify-between items-center text-sm bg-black/20 rounded-lg px-3 py-2"
-            >
-              <span>
-                <span className="text-purple-100/70">{author?.name}:</span>{" "}
-                {g.text}
-              </span>
-              <Verdict v={g.verdict} />
-            </div>
-          );
-        })}
-      </section>
-
+      {prizes.length > 0 && <PrizeFeed prizes={prizes} players={players} />}
       <Standings players={players} me={me} />
     </div>
   );
 }
 
+function VoteBtn({
+  current,
+  value,
+  label,
+  onClick,
+}: {
+  current: string | null;
+  value: "correct" | "partial" | "wrong";
+  label: string;
+  onClick: () => void;
+}) {
+  const active = current === value;
+  const palette =
+    value === "correct"
+      ? active
+        ? "bg-emerald-500 text-white"
+        : "bg-emerald-500/10 text-emerald-200 hover:bg-emerald-500/30"
+      : value === "partial"
+      ? active
+        ? "bg-amber-500 text-black"
+        : "bg-amber-500/10 text-amber-200 hover:bg-amber-500/30"
+      : active
+      ? "bg-red-500 text-white"
+      : "bg-red-500/10 text-red-200 hover:bg-red-500/30";
+  return (
+    <button
+      onClick={onClick}
+      className={`flex-1 px-3 py-2 rounded-lg text-sm font-semibold transition ${palette}`}
+    >
+      {label}
+    </button>
+  );
+}
+
+function PrizeFeed({
+  prizes,
+  players,
+}: {
+  prizes: Prize[];
+  players: Player[];
+}) {
+  const byId = new Map(players.map((p) => [p.id, p.name]));
+  return (
+    <section className="bg-amber-500/10 border border-amber-400/30 rounded-2xl p-5">
+      <h3 className="font-bold mb-2">🏆 Premios entregados</h3>
+      <ul className="space-y-1.5 text-sm">
+        {prizes.map((pr) => (
+          <li key={pr.id} className="bg-black/20 rounded-lg px-3 py-1.5">
+            <span className="font-semibold text-amber-200">
+              {byId.get(pr.recipient_id) ?? "—"}
+            </span>
+            : {pr.label}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
 function Verdict({ v }: { v: string | null }) {
   if (v === "correct")
-    return <span className="text-emerald-300 font-bold">✓</span>;
+    return <span className="text-emerald-300 font-bold">✓ 2pt</span>;
+  if (v === "partial")
+    return <span className="text-amber-200 font-bold">~ 1pt</span>;
   if (v === "wrong")
     return <span className="text-red-300 font-bold">✗</span>;
-  return <span className="text-amber-200 font-bold">?</span>;
+  return <span className="text-purple-100/50 font-bold">…</span>;
 }
 
 function Standings({ players, me }: { players: Player[]; me: Player }) {
@@ -590,7 +707,15 @@ function Standings({ players, me }: { players: Player[]; me: Player }) {
   );
 }
 
-function PlayerFinished({ players, me }: { players: Player[]; me: Player }) {
+function PlayerFinished({
+  players,
+  me,
+  prizes,
+}: {
+  players: Player[];
+  me: Player;
+  prizes: Prize[];
+}) {
   const sorted = [...players].sort((a, b) => b.score - a.score);
   const winner = sorted[0];
   const won = winner?.id === me.id;
@@ -601,10 +726,11 @@ function PlayerFinished({ players, me }: { players: Player[]; me: Player }) {
       </h1>
       <p className="text-purple-100/80">
         {won
-          ? "Sos el que más conoce al resto. Llevate el premio."
+          ? "Sos el que más conoce al resto."
           : `Ganador: ${winner?.name ?? "—"}.`}
       </p>
       <Standings players={players} me={me} />
+      {prizes.length > 0 && <PrizeFeed prizes={prizes} players={players} />}
     </div>
   );
 }
